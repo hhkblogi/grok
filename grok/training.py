@@ -47,7 +47,8 @@ class TrainableTransformer(LightningModule):
                         self.add_model_specific_args().
         """
         super().__init__()
-        self.hparams = hparams  # type: ignore
+        # Lightning 2.x compatibility: use save_hyperparameters instead of direct assignment
+        self.save_hyperparameters(vars(hparams))
         self.prepare_data()
 
         self.transformer = Transformer(
@@ -64,6 +65,9 @@ class TrainableTransformer(LightningModule):
         self.margin = torch.Tensor([0])
         self.next_epoch_to_eval = -1
         self.next_train_epoch_to_log = 0
+        # Lightning 2.x: store outputs for epoch end hooks
+        self.training_step_outputs = []
+        self.validation_step_outputs = []
 
     @staticmethod
     def add_model_specific_args(parser: ArgumentParser) -> ArgumentParser:
@@ -450,10 +454,10 @@ class TrainableTransformer(LightningModule):
         )
         self.fwd_time_in_epoch += time.time() - start
 
-        schedulers = self.trainer.lr_schedulers[0]
         if self.current_epoch != self.next_train_epoch_to_log:
             return {"loss": loss}
-        lr = schedulers["scheduler"].optimizer.param_groups[0]["lr"]
+        # Lightning 2.x compatible way to get learning rate
+        lr = self.optimizers().param_groups[0]["lr"]
         output = {
             "loss": loss,
             "partial_train_loss": coeff * loss,
@@ -466,20 +470,18 @@ class TrainableTransformer(LightningModule):
         if self.current_epoch == 0:
             output["x_lhs"] = x_lhs
 
+        # Lightning 2.x: store outputs for on_train_epoch_end
+        self.training_step_outputs.append(output)
         return output
 
-    def training_epoch_end(self, outputs):
+    def on_train_epoch_end(self):
         """
-        Used by pytorch_lightning
+        Used by pytorch_lightning (Lightning 2.x compatible)
         Accumulates results of all forward training passes in this epoch
-
-        :param outputs: a list of dicts from self.training_step()
-        :param batch_idx: which batch this is in the epoch.
-        :returns: a dict with loss, accuracy, lr, probabilities of solutions,
-                  attentions, and values
         """
+        outputs = self.training_step_outputs
         epoch_is_to_be_logged = self.current_epoch == self.next_train_epoch_to_log
-        if epoch_is_to_be_logged:
+        if epoch_is_to_be_logged and len(outputs) > 0:
             self.next_train_epoch_to_log = max(
                 int(1.01 * self.next_train_epoch_to_log),
                 self.next_train_epoch_to_log + 1,
@@ -518,6 +520,8 @@ class TrainableTransformer(LightningModule):
             }
             for k, v in logs.items():
                 self.log(k, v)
+        # Clear outputs for next epoch
+        self.training_step_outputs.clear()
 
     def validation_step(self, batch, batch_idx):
         """
@@ -547,18 +551,17 @@ class TrainableTransformer(LightningModule):
         if self.current_epoch == 0:
             output["x_lhs"] = x_lhs
 
+        # Lightning 2.x: store outputs for on_validation_epoch_end
+        self.validation_step_outputs.append(output)
         return output
 
-    def validation_epoch_end(self, outputs):
+    def on_validation_epoch_end(self):
         """
-        Used by pytorch_lightning
+        Used by pytorch_lightning (Lightning 2.x compatible)
         Accumulates results of all forward validation passes in this epoch
-
-        :param outputs: a list of dicts from self.validation_step()
-        :param batch_idx: which batch this is in the epoch.
-        :returns: a dict with val_loss, val_accuracy
         """
-        validation_is_real = len(outputs[0]) != 0
+        outputs = self.validation_step_outputs
+        validation_is_real = len(outputs) > 0 and len(outputs[0]) != 0
 
         if validation_is_real:
             self.next_epoch_to_eval = max(
@@ -610,8 +613,8 @@ class TrainableTransformer(LightningModule):
                     "epoch_" + str(self.current_epoch) + ".ckpt",
                 )
             )
-        if validation_is_real:
-            return logs
+        # Clear outputs for next epoch
+        self.validation_step_outputs.clear()
 
     def test_step(self, batch, batch_idx):
         """
@@ -714,19 +717,19 @@ def train(hparams: Namespace) -> None:
     #     verbose=False,
     # )
 
+    # Lightning 2.x compatible trainer args
     trainer_args = {
         "max_steps": hparams.max_steps,
-        "min_steps": hparams.max_steps,
         "max_epochs": int(1e8),
-        "val_check_interval": 1,
-        "profiler": False,
+        "check_val_every_n_epoch": 1,
         # "checkpoint_callback": checkpointer,
         "logger": logger,
         "log_every_n_steps": 1,
-        "flush_logs_every_n_steps": 1000,
+        "enable_progress_bar": True,
     }
     if torch.cuda.is_available() and hparams.gpu >= 0:
-        trainer_args["gpus"] = [hparams.gpu]
+        trainer_args["accelerator"] = "gpu"
+        trainer_args["devices"] = [hparams.gpu]
 
     trainer = Trainer(**trainer_args)
 
@@ -793,20 +796,19 @@ def compute_sharpness(hparams: Namespace, ckpts) -> None:
 
     logger = CSVLogger(hparams.logdir)
 
-
+    # Lightning 2.x compatible trainer args
     trainer_args = {
         "max_steps": hparams.max_steps,
-        "min_steps": hparams.max_steps,
         "max_epochs": int(1e8),
-        "val_check_interval": 1,
-        "profiler": False,
+        "check_val_every_n_epoch": 1,
         # "checkpoint_callback": checkpointer,
         "logger": logger,
         "log_every_n_steps": 1,
-        "flush_logs_every_n_steps": 1000,
+        "enable_progress_bar": True,
     }
     if torch.cuda.is_available() and hparams.gpu >= 0:
-        trainer_args["gpus"] = [hparams.gpu]
+        trainer_args["accelerator"] = "gpu"
+        trainer_args["devices"] = [hparams.gpu]
 
     trainer = Trainer(**trainer_args)
 
